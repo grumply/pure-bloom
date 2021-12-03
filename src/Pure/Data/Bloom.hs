@@ -34,7 +34,7 @@ import Data.Array.Unboxed
 import Data.Array.Unsafe
 
 import Control.Concurrent.MVar
-import Control.Monad (unless)
+import Control.Monad (foldM,unless)
 import Data.Bits
 import Data.Char
 import Data.Foldable
@@ -178,11 +178,15 @@ test bloom@(Bloom _ _ bits_) (toTxt -> val) = liftIO $ do
 size :: MonadIO m => Bloom -> m Int
 size Bloom { hashes, buckets, bits } = liftIO $ do
   arr <- readMVar bits
-  is <- sequence (fmap (readArray arr) [0..buckets - 1])
   let 
-    count :: Double
-    count = fromIntegral (sum (fmap (\b -> if b then 1 else 0) is) :: Int)
+    count :: IOUArray Int Bool -> Int -> Int -> IO Int
+    count arr !c bucket = do
+      b <- readArray arr bucket
+      pure (c + fromEnum b)
 
+  c <- foldM (count arr) (0 :: Int) [0..buckets - 1]
+
+  let
     bs :: Double
     bs = fromIntegral buckets
 
@@ -190,9 +194,9 @@ size Bloom { hashes, buckets, bits } = liftIO $ do
     hs = fromIntegral hashes
 
     n :: Double
-    n = negate bs / hs * logBase (exp 1) (1 - (count / bs))
+    n = negate bs / hs * logBase (exp 1) (1 - (fromIntegral c / bs))
 
-  pure (round n)
+  pure $! round n
 
 -- >>> l <- new 0.01 200
 -- >>> r <- new 0.01 200
