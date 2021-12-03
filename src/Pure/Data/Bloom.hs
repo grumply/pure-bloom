@@ -178,6 +178,7 @@ test bloom@(Bloom _ _ bits_) (toTxt -> val) = liftIO $ do
 size :: MonadIO m => Bloom -> m Int
 size Bloom { hashes, buckets, bits } = liftIO $ do
   arr <- readMVar bits
+
   let 
     count :: IOUArray Int Bool -> Int -> Int -> IO Int
     count arr !c bucket = do

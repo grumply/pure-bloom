@@ -29,6 +29,7 @@ library
     ViewPatterns
     RecordWildCards
     OverloadedStrings
+    BangPatterns
 
   hs-source-dirs: src
 
