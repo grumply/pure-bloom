@@ -1,7 +1,10 @@
 module Pure.Bloom.Scalable 
   ( Bloom(..), 
     fromBloom,
+    fromBloomWith,
+    bloom,
     new, 
+    newWith,
     add, 
     test, 
     update,
@@ -37,22 +40,28 @@ data Bloom = Bloom
   { epsilon :: {-# UNPACK #-}!Double
   , hashes  :: {-# UNPACK #-}!Int 
   , buckets :: {-# UNPACK #-}!Int 
-  , factor  :: {-# UNPACK #-}!Double
+  , scale   :: {-# UNPACK #-}!Double
+  , tighten :: {-# UNPACK #-}!Double
   , quota   :: {-# UNPACK #-}!(IORef (Int,Int))
   , blooms  :: {-# UNPACK #-}!(IORef [Bloom.Bloom])
   }
 
+{-# INLINE fromBloom #-}
 fromBloom :: MonadIO m => Bloom.Bloom -> m Bloom
-fromBloom b = fromBloomWith b 2
+fromBloom b = 
+  let e = exp 1
+  in fromBloomWith b e (1 - 1/e)
 
-fromBloomWith :: MonadIO m => Bloom.Bloom -> Double -> m Bloom
-fromBloomWith b@Bloom.Bloom {..} factor = liftIO do
+{-# INLINE fromBloomWith #-}
+fromBloomWith :: MonadIO m => Bloom.Bloom -> Double -> Double -> m Bloom
+fromBloomWith b@Bloom.Bloom {..} scale tighten = liftIO do
   sz     <- Bloom.size b
   let mx = Bloom.maximumSize b
   quota  <- newIORef (mx,sz)
   blooms <- newIORef [b]
   pure Bloom {..}
 
+{-# INLINE encode #-}
 encode :: MonadIO m => Bloom -> m Value
 encode Bloom {..} = liftIO do
   (s,c) <- readIORef quota
@@ -62,14 +71,16 @@ encode Bloom {..} = liftIO do
       [ "epsilon"  .= epsilon
       , "hashes"   .= hashes 
       , "buckets"  .= buckets
-      , "factor"   .= factor
+      , "scale"    .= scale
+      , "tighten"  .= tighten
       , "quota"    .= (s,c)
       , "blooms"   .= bs 
       ]
 
+{-# INLINE decode #-}
 decode :: MonadIO m => Value -> m (Maybe Bloom)
 decode v
-  | Just (epsilon,hashes,buckets,factor,q,bs) <- fields = liftIO do 
+  | Just (epsilon,hashes,buckets,scale,tighten,q,bs) <- fields = liftIO do 
     traverse Bloom.decode bs >>= \blooms ->
       if all isJust blooms then do
         quota  <- newIORef q
@@ -80,27 +91,34 @@ decode v
   | otherwise = 
     pure Nothing
   where
-    fields :: Maybe (Double,Int,Int,Double,(Int,Int),[Value])
+    fields :: Maybe (Double,Int,Int,Double,Double,(Int,Int),[Value])
     fields = parse v $ withObject "Bloom" $ \o -> do
       epsilon <- o .: "epsilon"
       hashes  <- o .: "hashes"
       buckets <- o .: "buckets"
-      factor  <- o .: "factor" 
+      scale   <- o .: "scale" 
+      tighten <- o .: "tighten"
       quota   <- o .: "quota"
       blooms  <- o .: "blooms"
-      pure (epsilon,hashes,buckets,factor,quota,blooms)
+      pure (epsilon,hashes,buckets,scale,tighten,quota,blooms)
 
 {-# INLINE bloom #-}
-bloom :: Double -> Int -> IO Bloom
-bloom = new
+bloom :: Double -> IO Bloom
+bloom epsilon = new epsilon (max 100 (round (10 * (1 / epsilon))))
 
 {-# INLINE new #-}
 new :: Double -> Int -> IO Bloom
-new epsilon size = newWith epsilon size 2
+new epsilon size = 
+  let e = exp 1
+  in newWith epsilon size e (1 - (1 / e))
 
 {-# INLINE newWith #-}
-newWith :: MonadIO m => Double -> Int -> Double -> m Bloom
-newWith epsilon size factor = liftIO do
+-- A smaller scaling factor increases the number of filters and lookups,
+-- but keeps the false positive rate lower. A reasonable default is e.
+-- A smaller tighten factor increases the size of each new filter. A
+-- reasonable default is (1 - (1/e))
+newWith :: MonadIO m => Double -> Int -> Double -> Double -> m Bloom
+newWith epsilon size scale tighten = liftIO do
   b@(Bloom.Bloom _ hashes buckets _ _) <- Bloom.new epsilon size
   quota <- newIORef (size,0)
   blooms <- newIORef [b]
@@ -116,19 +134,21 @@ update bs@Bloom {..} val = liftIO do
   b <- test bs val
   unless b do
     bs <- readIORef blooms
+    let Bloom.Bloom e _ _ _ _ = head bs
     added <- Bloom.update (head bs) val
     let 
       grow n = do
-        b <- Bloom.new epsilon n
+        b <- Bloom.new (tighten / scale * e) n
         atomicModifyIORef' blooms $ \bs -> (b:bs,())
 
     when added do
       join $ atomicModifyIORef' quota $ \(total,current) ->
-        if current + 1 == total then
-          let total' = round (fromIntegral total * factor)
-          in ((total',current + 1),grow total')
+        let current' = current + 1 in
+        if current' == total then
+          let total' = round (fromIntegral total * scale)
+          in ((total',current'),grow total')
         else
-          ((total,current + 1),pure ())
+          ((total,current'),pure ())
    
   pure (not b)
 
@@ -136,12 +156,11 @@ update bs@Bloom {..} val = liftIO do
 test :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
 test Bloom {..} (toTxt -> val) = liftIO do
   bs <- readIORef blooms
-  let hs = hash (head bs) val
-  or <$> traverse (go hs) bs
+  or <$> traverse go bs
   where
-    go :: [Int] -> Bloom.Bloom -> IO Bool
-    go hs Bloom.Bloom { hashes, buckets, bits } = 
-      and <$> traverse (readArray bits . (`mod` buckets)) (List.take hashes hs)
+    go :: Bloom.Bloom -> IO Bool
+    go b@Bloom.Bloom { hashes, buckets, bits } = 
+      and <$> traverse (readArray bits) (hash b val)
 
 {-# INLINE size #-}
 size :: MonadIO m => Bloom -> m Int
@@ -170,7 +189,7 @@ hash (Bloom.Bloom _ hashes buckets _ _) val =
     !hi = fromIntegral (shiftR h 32)
     !lo = fromIntegral (h .&. 0x00000000FFFFFFFF)
   in
-    fmap (\i -> hi + lo * i) [1..]
+    fmap (\i -> (hi + lo * i) `mod` buckets) [1..hashes]
 
 
 

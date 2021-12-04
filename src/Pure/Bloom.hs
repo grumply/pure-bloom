@@ -1,7 +1,6 @@
 {-# language DeriveAnyClass #-}
 module Pure.Bloom
   ( Bloom(..), 
-    bloom,
     new, 
     add, 
     test, 
@@ -94,10 +93,6 @@ decode v
       count   <- o .: "count"
       ints    <- o .: "ints" 
       pure (epsilon,hashes,buckets,count,ints)
-
-{-# INLINE bloom #-}
-bloom :: MonadIO m => Double -> Int -> m Bloom
-bloom = new
 
 -- | Produce a Bloom filter from a desired false positive rate (0.01 => 1%) and
 -- an upper bound of entries.
