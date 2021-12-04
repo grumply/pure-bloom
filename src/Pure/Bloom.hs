@@ -210,7 +210,7 @@ approximateSize Bloom { hashes, buckets, bits } = liftIO $ do
 
 {-# INLINE size #-}
 size :: MonadIO m => Bloom -> m Int
-size Bloom { count } = liftIO do
+size Bloom { count } = liftIO $ do
   readIORef count
 
 -- >>> l <- new 0.01 200
