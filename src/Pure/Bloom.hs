@@ -150,7 +150,7 @@ add bloom v = void (update bloom v)
 {-# INLINE update #-}
 -- returns True if the filter was updated, false if the value already existed
 update :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-update bloom@Bloom { count, bits } (toTxt -> val) = liftIO do
+update bloom@Bloom { count, bits } (toTxt -> val) = liftIO $ do
   b <- and <$> sequence (fmap (readArray bits) (hash bloom val))
   unless b $ do
     atomicModifyIORef' count $ \c -> 

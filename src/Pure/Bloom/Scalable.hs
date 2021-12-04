@@ -10,7 +10,7 @@ module Pure.Bloom.Scalable
     decode,
   ) where
 
-import qualified Pure.Data.Bloom as Bloom
+import qualified Pure.Bloom as Bloom
 
 import Pure.Data.Txt as Txt (Txt,ToTxt(..),foldl')
 import Pure.Data.JSON hiding ((!),encode,decode)
@@ -100,8 +100,8 @@ new :: Double -> Int -> IO Bloom
 new epsilon size = newWith epsilon size 2
 
 {-# INLINE newWith #-}
-newWith :: Double -> Int -> Double -> IO Bloom
-newWith epsilon size factor = do
+newWith :: MonadIO m => Double -> Int -> Double -> m Bloom
+newWith epsilon size factor = liftIO $ do
   b@(Bloom.Bloom _ hashes buckets _ _) <- Bloom.new epsilon size
   quota <- newIORef (size,0)
   blooms <- newIORef [b]
