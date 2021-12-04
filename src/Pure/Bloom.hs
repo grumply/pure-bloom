@@ -44,7 +44,7 @@ data Bloom = Bloom
 
 {-# INLINE encode #-}
 encode :: MonadIO m => Bloom -> m Value
-encode Bloom { epsilon, hashes, buckets, count, bits } = liftIO $ do
+encode Bloom { epsilon, hashes, buckets, count, bits } = liftIO do
   c <- readIORef count
   uarr :: UArray Int Bool <- unsafeFreeze bits 
   let 
@@ -75,7 +75,7 @@ encode Bloom { epsilon, hashes, buckets, count, bits } = liftIO $ do
 {-# INLINE decode #-}
 decode :: MonadIO m => Value -> m (Maybe Bloom)
 decode v
-  | Just (!epsilon,!hashes,!buckets,!c,ints) <- fields = liftIO $ do 
+  | Just (!epsilon,!hashes,!buckets,!c,ints) <- fields = liftIO do 
     count <- newIORef c
     bits <- newArray (0,buckets) False
     for_ (zip [0..] ints) $ \(off,int) -> do
@@ -105,7 +105,7 @@ bloom = new
 -- >>> Bloom 7 2075680 _ <- new 0.01 216553
 {-# INLINE new #-}
 new :: MonadIO m => Double -> Int -> m Bloom
-new epsilon (fromIntegral -> bs) = liftIO $ do
+new epsilon (fromIntegral -> bs) = liftIO do
   let clusters, leftovers :: Int
       (clusters,leftovers) = ceiling (negate bs * ln epsilon / ln2 ^ (2 :: Int)) `quotRem` 32
 
@@ -150,9 +150,9 @@ add bloom v = void (update bloom v)
 {-# INLINE update #-}
 -- returns True if the filter was updated, false if the value already existed
 update :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-update bloom@Bloom { count, bits } (toTxt -> val) = liftIO $ do
+update bloom@Bloom { count, bits } (toTxt -> val) = liftIO do
   b <- and <$> sequence (fmap (readArray bits) (hash bloom val))
-  unless b $ do
+  unless b do
     atomicModifyIORef' count $ \c -> 
       let !c' = c + 1 
       in (c',())
@@ -176,7 +176,7 @@ Test if a Txt value is in the filter.
 -}
 {-# INLINE test #-}
 test :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-test bloom@(Bloom _ _ _ _ bits) (toTxt -> val) = liftIO $ do
+test bloom@(Bloom _ _ _ _ bits) (toTxt -> val) = liftIO do
   and <$> sequence (fmap (readArray bits) (hash bloom val))
 
 -- >>> let ks = [ [x,y] | let abcs = ['a'..'z'], x <- abcs, y <- abcs ]
@@ -187,7 +187,7 @@ test bloom@(Bloom _ _ _ _ bits) (toTxt -> val) = liftIO $ do
 -- (676,678)
 {-# INLINE approximateSize #-}
 approximateSize :: MonadIO m => Bloom -> m Int
-approximateSize Bloom { hashes, buckets, bits } = liftIO $ do
+approximateSize Bloom { hashes, buckets, bits } = liftIO do
   let 
     count :: Int -> Int -> IO Int
     count !c bucket = do
@@ -210,7 +210,7 @@ approximateSize Bloom { hashes, buckets, bits } = liftIO $ do
 
 {-# INLINE size #-}
 size :: MonadIO m => Bloom -> m Int
-size Bloom { count } = liftIO $ do
+size Bloom { count } = liftIO do
   readIORef count
 
 -- >>> l <- new 0.01 200
@@ -227,7 +227,7 @@ size Bloom { count } = liftIO $ do
 {-# INLINE union #-}
 union :: MonadIO m => Bloom -> Bloom -> m (Maybe Bloom)
 union (Bloom el hsl bsl _ bitsl) (Bloom er hsr bsr _ bitsr)
-  | el == er && hsl == hsr && bsl == bsr = liftIO $ do 
+  | el == er && hsl == hsr && bsl == bsr = liftIO do 
     l :: UArray Int Bool <- unsafeFreeze bitsl
     r :: UArray Int Bool <- unsafeFreeze bitsr
     bits <- newListArray (0,bsl) (zipWith (||) (elems l) (elems r))
@@ -254,7 +254,7 @@ union (Bloom el hsl bsl _ bitsl) (Bloom er hsr bsr _ bitsr)
 {-# INLINE intersection #-}
 intersection :: MonadIO m => Bloom -> Bloom -> m (Maybe Bloom)
 intersection (Bloom el hsl bsl _ bitsl) (Bloom er hsr bsr _ bitsr)
-  | el == er && hsl == hsr && bsl == bsr = liftIO $ do 
+  | el == er && hsl == hsr && bsl == bsr = liftIO do 
     l :: UArray Int Bool <- unsafeFreeze bitsl
     r :: UArray Int Bool <- unsafeFreeze bitsr
     bits <- newListArray (0,bsl) (zipWith (&&) (elems l) (elems r))

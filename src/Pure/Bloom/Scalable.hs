@@ -46,16 +46,15 @@ fromBloom :: MonadIO m => Bloom.Bloom -> m Bloom
 fromBloom b = fromBloomWith b 2
 
 fromBloomWith :: MonadIO m => Bloom.Bloom -> Double -> m Bloom
-fromBloomWith b@Bloom.Bloom {..} factor = liftIO $ do
+fromBloomWith b@Bloom.Bloom {..} factor = liftIO do
   sz     <- Bloom.size b
   let mx = Bloom.maximumSize b
   quota  <- newIORef (mx,sz)
   blooms <- newIORef [b]
   pure Bloom {..}
 
-
 encode :: MonadIO m => Bloom -> m Value
-encode Bloom {..} = liftIO $ do
+encode Bloom {..} = liftIO do
   (s,c) <- readIORef quota
   bs <- readIORef blooms >>= traverse Bloom.encode
   pure $
@@ -70,7 +69,7 @@ encode Bloom {..} = liftIO $ do
 
 decode :: MonadIO m => Value -> m (Maybe Bloom)
 decode v
-  | Just (epsilon,hashes,buckets,factor,q,bs) <- fields = liftIO $ do 
+  | Just (epsilon,hashes,buckets,factor,q,bs) <- fields = liftIO do 
     traverse Bloom.decode bs >>= \blooms ->
       if all isJust blooms then do
         quota  <- newIORef q
@@ -101,7 +100,7 @@ new epsilon size = newWith epsilon size 2
 
 {-# INLINE newWith #-}
 newWith :: MonadIO m => Double -> Int -> Double -> m Bloom
-newWith epsilon size factor = liftIO $ do
+newWith epsilon size factor = liftIO do
   b@(Bloom.Bloom _ hashes buckets _ _) <- Bloom.new epsilon size
   quota <- newIORef (size,0)
   blooms <- newIORef [b]
@@ -113,9 +112,9 @@ add bs a = void (update bs a)
 
 {-# INLINE update #-}
 update :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-update bs@Bloom {..} val = liftIO $ do
+update bs@Bloom {..} val = liftIO do
   b <- test bs val
-  unless b $ do
+  unless b do
     bs <- readIORef blooms
     added <- Bloom.update (head bs) val
     let 
@@ -135,7 +134,7 @@ update bs@Bloom {..} val = liftIO $ do
 
 {-# INLINE test #-}
 test :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-test Bloom {..} (toTxt -> val) = liftIO $ do
+test Bloom {..} (toTxt -> val) = liftIO do
   bs <- readIORef blooms
   let hs = hash (head bs) val
   or <$> traverse (go hs) bs
@@ -146,7 +145,7 @@ test Bloom {..} (toTxt -> val) = liftIO $ do
 
 {-# INLINE size #-}
 size :: MonadIO m => Bloom -> m Int
-size Bloom { quota } = liftIO $ do
+size Bloom { quota } = liftIO do
   snd <$> readIORef quota
 
 -- FNV-1a 
