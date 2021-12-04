@@ -1,18 +1,7 @@
-{-|
-Module      : Pure.Data.Bloom
-Description : A simple bloom filter 
-Copyright   : (c) Sean Hickman, 2020
-License     : BSD-3
-Maintainer  : sean@grumply.com
-Stability   : experimental
-Portability : JavaScript
-
-A basic thread-safe mutable bloom filter for textual values or values with a 
-unique textual representation.
--}
 {-# language DeriveAnyClass #-}
-module Pure.Data.Bloom
-  ( Bloom, 
+module Pure.Bloom
+  ( Bloom(..), 
+    bloom,
     new, 
     add, 
     test, 
@@ -22,6 +11,8 @@ module Pure.Data.Bloom
     decode, 
     union, 
     intersection,
+    approximateSize,
+    maximumSize
   ) where
 
 import Pure.Data.Txt as Txt (Txt,ToTxt(..),foldl')
@@ -34,22 +25,28 @@ import Data.Array.Unboxed
 import Data.Array.Unsafe
 
 import Control.Concurrent.MVar
-import Control.Monad (foldM,unless)
+import Control.Monad (foldM,unless,void,when)
 import Data.Bits
 import Data.Char
 import Data.Foldable
+import Data.Function
+import Data.IORef
+import Data.List as List (foldl')
 import Data.Word
 
 data Bloom = Bloom 
-  { hashes  :: {-# UNPACK #-}!Int 
+  { epsilon :: {-# UNPACK #-}!Double
+  , hashes  :: {-# UNPACK #-}!Int 
   , buckets :: {-# UNPACK #-}!Int 
-  , bits    :: {-# UNPACK #-}!(MVar (IOUArray Int Bool))
+  , count   :: {-# UNPACK #-}!(IORef Int)
+  , bits    :: {-# UNPACK #-}!(IOUArray Int Bool)
   }
 
 {-# INLINE encode #-}
 encode :: MonadIO m => Bloom -> m Value
-encode Bloom { hashes, buckets, bits } = liftIO $ do
-  uarr :: UArray Int Bool <- readMVar bits >>= unsafeFreeze
+encode Bloom { epsilon, hashes, buckets, count, bits } = liftIO $ do
+  c <- readIORef count
+  uarr :: UArray Int Bool <- unsafeFreeze bits 
   let 
     ints =
       flip fmap [0 .. (buckets `div` 32) - 1] $ \int ->
@@ -59,11 +56,13 @@ encode Bloom { hashes, buckets, bits } = liftIO $ do
             set i a
               | uarr ! (b + i) = setBit a i
               | otherwise      = a
-        in foldr set 0 [0..31]
-  pure $
+        in List.foldl' (flip set) 0 [0..31]
+  pure $!
     object
-      [ "hashes"  .= hashes 
+      [ "epsilon" .= epsilon
+      , "hashes"  .= hashes 
       , "buckets" .= buckets
+      , "count"   .= c
       , "ints"    .= ints 
       ]
 
@@ -76,22 +75,29 @@ encode Bloom { hashes, buckets, bits } = liftIO $ do
 {-# INLINE decode #-}
 decode :: MonadIO m => Value -> m (Maybe Bloom)
 decode v
-  | Just (hashes,buckets,ints) <- fields = liftIO $ do 
-    iouarr <- newArray (0,buckets) False
+  | Just (!epsilon,!hashes,!buckets,!c,ints) <- fields = liftIO $ do 
+    count <- newIORef c
+    bits <- newArray (0,buckets) False
     for_ (zip [0..] ints) $ \(off,int) -> do
       for_ [0..31] $ \b ->
-        writeArray iouarr (off * 32 + b) (testBit int b)
-    bits <- newMVar iouarr 
+        when (testBit int b) $
+          writeArray bits (off * 32 + b) True
     pure (Just Bloom {..})
   | otherwise = 
     pure Nothing
   where
-    fields :: Maybe (Int,Int,[Int])
+    fields :: Maybe (Double,Int,Int,Int,[Int])
     fields = parse v $ withObject "Bloom" $ \o -> do
+      epsilon <- o .: "epsilon"
       hashes  <- o .: "hashes"
       buckets <- o .: "buckets"
+      count   <- o .: "count"
       ints    <- o .: "ints" 
-      pure (hashes,buckets,ints)
+      pure (epsilon,hashes,buckets,count,ints)
+
+{-# INLINE bloom #-}
+bloom :: MonadIO m => Double -> Int -> m Bloom
+bloom = new
 
 -- | Produce a Bloom filter from a desired false positive rate (0.01 => 1%) and
 -- an upper bound of entries.
@@ -109,8 +115,9 @@ new epsilon (fromIntegral -> bs) = liftIO $ do
       hashes :: Double
       hashes = fromIntegral buckets / bs * ln2
 
-  bits <- newMVar =<< newArray (0,buckets) False
-  pure (Bloom (ceiling hashes) buckets bits)
+  count <- newIORef 0
+  bits <- newArray (0,buckets) False
+  pure (Bloom epsilon (ceiling hashes) buckets count bits)
   where
     ln = logBase (exp 1)
     ln2 = ln 2
@@ -125,28 +132,32 @@ new epsilon (fromIntegral -> bs) = liftIO $ do
 -- (5,32,[0,29,26,23,20],[0,5,10,15,20])
 {-# INLINE hash #-}
 hash :: Bloom -> Txt -> [Int]
-hash (Bloom hashes buckets _) val =
+hash (Bloom _ hashes buckets _ _) val =
   let
-    h = fnv64 val
-    hi = fromIntegral (shiftR h 32)
-    lo = fromIntegral (h .&. 0x00000000FFFFFFFF)
+    -- We want the list of hashes to be lazy, but
+    -- we know that at least 1 will always be materialized,
+    -- so go ahead and make these constants strict.
+    !h = fnv64 val
+    !hi = fromIntegral (shiftR h 32)
+    !lo = fromIntegral (h .&. 0x00000000FFFFFFFF)
   in
     fmap (\i -> (hi + lo * i) `mod` buckets) [1..hashes]
 
 {-# INLINE add #-}
 add :: (MonadIO m, ToTxt a) => Bloom -> a -> m ()
-add bloom@(Bloom _ _ bits_) (toTxt -> val) =
-  liftIO $ 
-    withMVar bits_ $ \bits ->
-      for_ (hash bloom val) $ \h -> 
-        writeArray bits h True
+add bloom v = void (update bloom v)
 
 {-# INLINE update #-}
 -- returns True if the filter was updated, false if the value already existed
 update :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-update bloom (toTxt -> val) = do
-  b <- test bloom val
-  unless b (add bloom val)
+update bloom@Bloom { count, bits } (toTxt -> val) = liftIO do
+  b <- and <$> sequence (fmap (readArray bits) (hash bloom val))
+  unless b $ do
+    atomicModifyIORef' count $ \c -> 
+      let !c' = c + 1 
+      in (c',())
+    for_ (hash bloom val) $ \bucket -> 
+      writeArray bits bucket True
   pure (not b)
 
 {-|
@@ -163,9 +174,9 @@ Test if a Txt value is in the filter.
 -- >>> new 0.0 2 >>= \b -> add good b >> (,) <$> test good b <*> test bad b
 -- (True,True)
 -}
+{-# INLINE test #-}
 test :: (MonadIO m, ToTxt a) => Bloom -> a -> m Bool
-test bloom@(Bloom _ _ bits_) (toTxt -> val) = liftIO $ do
-  bits <- readMVar bits_
+test bloom@(Bloom _ _ _ _ bits) (toTxt -> val) = liftIO $ do
   and <$> sequence (fmap (readArray bits) (hash bloom val))
 
 -- >>> let ks = [ [x,y] | let abcs = ['a'..'z'], x <- abcs, y <- abcs ]
@@ -174,18 +185,16 @@ test bloom@(Bloom _ _ bits_) (toTxt -> val) = liftIO $ do
 -- >>> s <- size b
 -- >>> (length ks,s)
 -- (676,678)
-{-# INLINE size #-}
-size :: MonadIO m => Bloom -> m Int
-size Bloom { hashes, buckets, bits } = liftIO $ do
-  arr <- readMVar bits
-
+{-# INLINE approximateSize #-}
+approximateSize :: MonadIO m => Bloom -> m Int
+approximateSize Bloom { hashes, buckets, bits } = liftIO $ do
   let 
-    count :: IOUArray Int Bool -> Int -> Int -> IO Int
-    count arr !c bucket = do
-      b <- readArray arr bucket
+    count :: Int -> Int -> IO Int
+    count !c bucket = do
+      b <- readArray bits bucket
       pure (c + fromEnum b)
 
-  c <- foldM (count arr) (0 :: Int) [0..buckets - 1]
+  c <- foldM count (0 :: Int) [0..buckets - 1]
 
   let
     bs :: Double
@@ -198,6 +207,11 @@ size Bloom { hashes, buckets, bits } = liftIO $ do
     n = negate bs / hs * logBase (exp 1) (1 - (fromIntegral c / bs))
 
   pure $! round n
+
+{-# INLINE size #-}
+size :: MonadIO m => Bloom -> m Int
+size Bloom { count } = liftIO do
+  readIORef count
 
 -- >>> l <- new 0.01 200
 -- >>> r <- new 0.01 200
@@ -212,12 +226,16 @@ size Bloom { hashes, buckets, bits } = liftIO $ do
 -- (True,True)
 {-# INLINE union #-}
 union :: MonadIO m => Bloom -> Bloom -> m (Maybe Bloom)
-union (Bloom hsl bsl bitsl_) (Bloom hsr bsr bitsr_)
-  | hsl == hsr && bsl == bsr = liftIO $ do 
-    bitsl :: UArray Int Bool <- readMVar bitsl_ >>= unsafeFreeze
-    bitsr :: UArray Int Bool <- readMVar bitsr_ >>= unsafeFreeze
-    bits <- newListArray (0,bsl) (zipWith (||) (elems bitsl) (elems bitsr)) >>= newMVar
-    pure (Just (Bloom hsl bsl bits))
+union (Bloom el hsl bsl _ bitsl) (Bloom er hsr bsr _ bitsr)
+  | el == er && hsl == hsr && bsl == bsr = liftIO $ do 
+    l :: UArray Int Bool <- unsafeFreeze bitsl
+    r :: UArray Int Bool <- unsafeFreeze bitsr
+    bits <- newListArray (0,bsl) (zipWith (||) (elems l) (elems r))
+    c <- newIORef 0
+    let b = Bloom el hsl bsl c bits
+    count <- approximateSize b
+    writeIORef c count
+    pure (Just b)
   | otherwise = 
     pure Nothing
 
@@ -235,14 +253,22 @@ union (Bloom hsl bsl bitsl_) (Bloom hsr bsr bitsr_)
 -- (True,False)
 {-# INLINE intersection #-}
 intersection :: MonadIO m => Bloom -> Bloom -> m (Maybe Bloom)
-intersection (Bloom hsl bsl bitsl_) (Bloom hsr bsr bitsr_)
-  | hsl == hsr && bsl == bsr = liftIO $ do 
-    bitsl :: UArray Int Bool <- readMVar bitsl_ >>= unsafeFreeze
-    bitsr :: UArray Int Bool <- readMVar bitsr_ >>= unsafeFreeze
-    bits <- newListArray (0,bsl) (zipWith (&&) (elems bitsl) (elems bitsr)) >>= newMVar
-    pure (Just (Bloom hsl bsl bits))
+intersection (Bloom el hsl bsl _ bitsl) (Bloom er hsr bsr _ bitsr)
+  | el == er && hsl == hsr && bsl == bsr = liftIO $ do 
+    l :: UArray Int Bool <- unsafeFreeze bitsl
+    r :: UArray Int Bool <- unsafeFreeze bitsr
+    bits <- newListArray (0,bsl) (zipWith (&&) (elems l) (elems r))
+    c <- newIORef 0
+    let b = Bloom el hsl bsl c bits
+    count <- approximateSize b
+    writeIORef c count
+    pure (Just b)
   | otherwise = 
     pure Nothing
+
+maximumSize :: Bloom -> Int
+maximumSize Bloom { hashes = fromIntegral -> k, buckets = fromIntegral -> m, epsilon = p } =
+  ceiling(m / (negate k / log(1 - exp(log(p) / k))))
 
 -- FNV-1a 
 {-# INLINE fnv64 #-}
@@ -251,7 +277,7 @@ fnv64 = Txt.foldl' h 0xcbf29ce484222325
   where
     {-# INLINE h #-}
     h :: Word64 -> Char -> Word64
-    h i c = 
+    h !i c = 
       let i' = i `xor` fromIntegral (ord c) 
       in i' * 0x100000001b3
 
